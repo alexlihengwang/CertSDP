@@ -19,6 +19,8 @@ function certSDP(qmp::Problem, penalty::Float64, R::Float64, G::Float64;
         G ≥ Lipschitz constant of objective
     =#
 
+    time_0 = time()
+
     n, k, m = qmp.n, qmp.k, qmp.m
 
     # initalize Accelegrad quantities
@@ -53,10 +55,7 @@ function certSDP(qmp::Problem, penalty::Float64, R::Float64, G::Float64;
     # run accelegrad
     verbose && println("dual iterations")
     for tt in 0:maxiter
-        if !isnothing(maxtime) && !isnothing(iterate_info) &&
-           (length(iterate_info.d_time) >= 1) && (iterate_info.d_time[end] >= maxtime)
-            break
-        end
+        time_limit_exceed = (!isnothing(maxtime) && (time() - time_0 >= maxtime))
 
         α = (tt <= 2) ? 1.0 : (tt + 1.0) / 4.0
         τ = 1.0 / α
@@ -96,7 +95,7 @@ function certSDP(qmp::Problem, penalty::Float64, R::Float64, G::Float64;
         dual_val = first_order_info(qmp, penalty, γout, Tout, γ∇, T∇, fo_mem)
         !isnothing(iterate_info) && push_d!(iterate_info, dual_val)
 
-        if tt in savehist
+        if tt in savehist || time_limit_exceed
             # attempt to construct strongly convex QMMP with bounded condition number
             qmmp_flag, qmmp_data... = construct_qmmp(qmp, γout, X, cq_mem)
 
@@ -112,6 +111,8 @@ function certSDP(qmp::Problem, penalty::Float64, R::Float64, G::Float64;
                 verbose && println("dual iterations")
             end
         end
+
+        time_limit_exceed && break
     end
 
     return X

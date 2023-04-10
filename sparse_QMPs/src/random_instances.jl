@@ -1,16 +1,28 @@
-module QMPProblems
+struct Problem
+    #=
+        min_{X ∈ R^(n \times k)} {q₀(X) : qᵢ(X) = 0, ∀ i ∈ [m]}
 
-export random_instance
-export Problem
+        where ∀ i ∈ [0,...,m]:
+        qᵢ(X) = ⟨X, Aᵢ X⟩ / 2 + ⟨Bᵢ, X⟩ + cᵢ
+        Mᵢ = (Aᵢ/2  Bᵢ/2)
+             (Bᵢ/2⊺ cᵢ/k⋅Iₖ)
+    =#
+    n::Int
+    k::Int
+    m::Int
+    A₀::SparseMatrixCSC{Float64,Int64}
+    B₀::Matrix{Float64}
+    c₀::Float64
+    M₀::SparseMatrixCSC{Float64,Int64}
+    As::Vector{SparseMatrixCSC{Float64,Int64}}
+    Bs::Vector{Matrix{Float64}}
+    cs::Vector{Float64}
+    Ms::Vector{SparseMatrixCSC{Float64,Int64}}
+    A_bound::Float64
+    B_bound::Float64
+end
 
-using LinearAlgebra
-using SparseArrays
-using LinearMaps
-using KrylovKit
-
-using ..QMPSolver: Problem
-
-function symmetrize(A::SparseMatrixCSC{Float64, Int64})
+function sparse_symmetrize(A::SparseMatrixCSC{Float64, Int64})
     n, _ = size(A)
     I, J, V = findnz(A)
     return sparse(vcat(I,J),vcat(J,I),vcat(V,V),n,n)
@@ -18,7 +30,7 @@ end
 
 function sprand_sym_norm(n::Int, density::Float64)
     A = sprand(n, n, density/2.0)
-    sA = symmetrize(A)
+    sA = sparse_symmetrize(A)
     vals, _, _ = eigsolve(sA, 1, :LM; issymmetric=true, ishermitian=true)
     if vals[1] != 0.0
         sA .*= (1/abs(vals[1]))
@@ -105,6 +117,4 @@ function random_instance(n::Int, m::Int, k::Int, μ::Float64, density::Float64)
     Ms = [ABc_to_M(As[i], Bs[i], cs[i], k) for i=1:m]
 
     return Problem(n, k, m, A₀, B₀, c₀, M₀, As, Bs, cs, Ms, 1, 1), X★, γ★, opt
-end
-
 end

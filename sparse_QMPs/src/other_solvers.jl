@@ -2,6 +2,7 @@ function cssdp(qmp::Problem, penalty::Float64, R::Float64, G::Float64;
     maxiter::Int=100000, verbose::Bool=false, iterate_info::Union{Iterate_info,Nothing}=nothing,
     savehist::Union{Vector{Int},Nothing}=nothing, maxtime::Union{Float64,Nothing}=nothing)
 
+    time_0 = time()
     n, k, m = qmp.n, qmp.k, qmp.m
 
     # initalize quantities
@@ -60,10 +61,7 @@ function cssdp(qmp::Problem, penalty::Float64, R::Float64, G::Float64;
     # run accelegrad
     verbose && println("dual iterations")
     for tt in 0:maxiter
-        if !isnothing(maxtime) && !isnothing(iterate_info) &&
-           (length(iterate_info.d_time) >= 1) && (iterate_info.d_time[end] >= maxtime)
-            break
-        end
+        time_limit_exceeded = (!isnothing(maxtime) && (time() - time_0 >= maxtime))
 
         α = (tt <= 2) ? 1.0 : (tt + 1.0) / 4.0
         τ = 1.0 / α
@@ -103,7 +101,7 @@ function cssdp(qmp::Problem, penalty::Float64, R::Float64, G::Float64;
         dual_val = first_order_info(qmp, penalty, γout, Tout, γ∇, T∇, fo_mem)
         !isnothing(iterate_info) && push_d!(iterate_info, dual_val)
 
-        if tt in savehist
+        if tt in savehist || time_limit_exceeded
             !isnothing(iterate_info) && push_d!(iterate_info, nothing)
 
             verbose && println("solving compressed SDP")
@@ -145,6 +143,8 @@ function cssdp(qmp::Problem, penalty::Float64, R::Float64, G::Float64;
 
             verbose && println("dual iterations")
         end
+
+        time_limit_exceeded && break
     end
 
     return X_out
@@ -222,6 +222,7 @@ function sketchy_cgal(qmp::Problem, α::Float64;
     # This is simpler and allows us to directly reconstruct the QMP solution
     # as opposed to sketching and reconstructing from the sketch
     
+    time_0 = time()
     n, m, k = qmp.n, qmp.m, qmp.k
     
     if isnothing(savehist)
@@ -259,10 +260,7 @@ function sketchy_cgal(qmp::Problem, α::Float64;
     temp_nk = zeros(n, k)
 
     for tt=1:maxiter
-        if !isnothing(maxtime) && !isnothing(iterate_info) &&
-            (length(iterate_info.p_time) >= 1) && (iterate_info.p_time[end] >= maxtime)
-            break
-         end
+        time_limit_exceeded = (!isnothing(maxtime) && (time() - time_0 >= maxtime))
  
         β = β₀ * sqrt(tt + 1.0)
         η = 2.0 / (tt + 1.0)
@@ -316,7 +314,7 @@ function sketchy_cgal(qmp::Problem, α::Float64;
         γy .= γy .+ step_length .* γz
         Ty .= Ty .+ step_length .* (Tz .- sparse(I, k, k))
 
-        if tt in savehist
+        if tt in savehist || time_limit_exceeded
             if !isnothing(iterate_info)
                 push_p!(iterate_info, X)
             end
@@ -329,5 +327,112 @@ function sketchy_cgal(qmp::Problem, α::Float64;
             end
             maxqi <= 1e-13 && break
         end
+
+        time_limit_exceeded && break
+    end
+end
+
+function burer_monteiro(qmp::Problem, γ::Float64, η::Float64, σ::Float64;
+    maxiter::Int=100000, iterate_info::Union{Iterate_info,Nothing}=nothing,
+    savehist::Union{Vector{Int},Nothing}=nothing, maxtime::Union{Float64,Nothing}=nothing, σ_max = 1e5)
+
+    time_0 = time()
+    n, k, m = qmp.n, qmp.k, qmp.m
+
+    if isnothing(savehist)
+        savehist=1:maxiter
+    end
+
+    C = copy(qmp.M₀)
+    As = copy(qmp.Ms)
+    bs = []
+    for _ = 1:m
+        push!(bs, 0.0)
+    end
+    for i=1:k
+        push!(As, sparse([n + i], [n + i], [1], n + k, n + k))
+        push!(bs, 1)
+        for j = i+1:k
+            push!(As, sparse([n + i, n + j], [n + j, n + i], [1, 1], n + k, n + k))
+            push!(bs, 0)
+        end
+    end
+
+    num_constraints = length(As)
+
+    temp_npk = zeros(n+k, k)
+    temp_nk = zeros(n, k)
+    errors = zeros(num_constraints)
+
+    function compute_err(R, errors)
+        for i = 1:num_constraints
+            mul!(temp_npk, As[i], R)
+            errors[i] = dot(R, temp_npk) - bs[i]
+        end
+    end
+
+    R = zeros(n + k, k)
+    R[n+1:end,1:k] = Matrix(1.0 * I, k, k)
+
+    compute_err(R, errors)
+    v = norm(errors)^2
+
+    y = zeros(num_constraints)
+    y_prev = zeros(num_constraints)
+
+    X = zeros(n,k)
+
+    for tt in 0:maxiter
+        time_limit_exceeded = (!isnothing(maxtime) && (time() - time_0 >= maxtime))
+
+        function f(R̂)
+            compute_err(R̂, errors)
+            mul!(temp_npk, C, R̂)
+            return dot(R̂, temp_npk) - dot(y, errors) + σ / 2 * norm(errors)^2
+        end
+
+        function g!(G, R̂)
+            compute_err(R̂, errors)
+            mul!(G, C, R̂)
+            for i=1:num_constraints
+                mul!(temp_npk, As[i], R̂)
+                G .+= (σ * errors[i] - y[i]) .* temp_npk
+            end
+
+            G .*= 2
+        end
+
+        # println("lbfgs")
+        res = optimize(f, g!, R, LBFGS(), Optim.Options(iterations = 1000000))
+        R .= res.minimizer
+        compute_err(R, errors)
+        v_new = norm(errors)^2
+
+        # println("updating y, v, σ")
+        if v_new < η * v || σ > σ_max
+            y_prev .= y
+            y .-= σ .* errors
+            v = v_new
+        else
+            σ *= γ
+        end
+
+        if tt in savehist || time_limit_exceeded
+            mul!(X, R[1:n,:], R[n+1:end,:]')
+            if !isnothing(iterate_info)
+                push_p!(iterate_info, X)
+            end
+
+            maxqi = 0
+            for i = 1:m
+                mul!(temp_nk, qmp.As[i], X)
+                qi = dot(X, temp_nk) / 2 + dot(qmp.Bs[i], X) + qmp.cs[i]
+
+                maxqi = max(maxqi, abs(qi))
+            end
+            maxqi <= 1e-13 && break
+        end
+
+        time_limit_exceeded && break
     end
 end
